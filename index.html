@@ -611,26 +611,13 @@
             if (!date || !currentUser) return;
             const dayIdx = weekdayIndexFromDate(date);
             document.getElementById('input-selected-day').value = String(dayIdx);
-            try {
-                const snap = await db.collection('users').doc(currentUser.uid)
-                    .collection('dailyEntries').doc(date).get();
-                if (snap.exists) {
-                    const record = snap.data();
-                    Object.entries({
-                        'entry-uber':'uber','entry-99':'app99','entry-indrive':'indrive','entry-karona':'karona',
-                        'entry-other-apps':'otherApps','entry-recharge':'recharge','entry-km':'km','entry-hours':'hours',
-                        'entry-food':'food','entry-other':'other'
-                    }).forEach(([id,key]) => document.getElementById(id).value = record[key] ?? '');
-                    setSaveStatus(`Registro de ${date} carregado`, true);
-                } else {
-                    ['entry-uber','entry-99','entry-indrive','entry-karona','entry-other-apps','entry-recharge','entry-km','entry-hours','entry-food','entry-other'].forEach(id => document.getElementById(id).value = '');
-                    setSaveStatus(`Novo lançamento para ${date}`, true);
-                }
-                calculateFormTotal();
-            } catch (err) {
-                console.error('Erro ao consultar histórico:', err);
-                setSaveStatus('Não foi possível consultar essa data.', false);
-            }
+            // Cada envio é um lançamento independente. Ao trocar a data,
+            // iniciamos um formulário novo, sem sobrescrever registros anteriores.
+            ['entry-uber','entry-99','entry-indrive','entry-karona','entry-other-apps',
+             'entry-recharge','entry-km','entry-hours','entry-food','entry-other']
+                .forEach(id => document.getElementById(id).value = '');
+            calculateFormTotal();
+            setSaveStatus(`Novo lançamento para ${date}`, true);
         }
 
         async function saveDailyRecordToHistory() {
@@ -642,10 +629,12 @@
                 year: Number(date.slice(0,4)),
                 month: Number(date.slice(5,7)),
                 day: Number(date.slice(8,10)),
+                createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                 updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             };
+            // add() cria um ID único: vários lançamentos na mesma data não se substituem.
             await db.collection('users').doc(currentUser.uid)
-                .collection('dailyEntries').doc(date).set(record, { merge: true });
+                .collection('dailyEntries').add(record);
             await loadHistory();
         }
 
@@ -654,7 +643,7 @@
             if (!container || !currentUser) return;
             try {
                 const snap = await db.collection('users').doc(currentUser.uid)
-                    .collection('dailyEntries').orderBy('date', 'desc').limit(100).get();
+                    .collection('dailyEntries').orderBy('date', 'desc').limit(200).get();
                 if (snap.empty) {
                     container.innerHTML = '<p class="text-xs text-slate-500">Nenhum lançamento histórico salvo ainda.</p>';
                     return;
@@ -664,22 +653,33 @@
                     const r = doc.data();
                     const row = document.createElement('div');
                     row.className = 'w-full text-left bg-slate-950 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2';
-                    const dateLabel = doc.id.split('-').reverse().join('/');
-                    const gross = (r.uber||0)+(r.app99||0)+(r.indrive||0)+(r.karona||0)+(r.otherApps||0);
-                    const expenses = (r.recharge||0)+(r.food||0)+(r.other||0);
-                    const info = document.createElement('button');
-                    info.type = 'button';
-                    info.className = 'flex-1 min-w-0 text-left flex flex-col gap-1 hover:opacity-80';
-                    const title = document.createElement('span'); title.className='font-semibold text-white'; title.textContent=dateLabel;
-                    const detail = document.createElement('span'); detail.className='text-xs text-slate-400'; detail.textContent=`Ganhos: ${formatBRL(gross)} · Despesas extras: ${formatBRL(expenses)} · KM: ${r.km||0}`;
-                    info.append(title, detail);
-                    info.addEventListener('click', async () => { document.getElementById('entry-date').value=doc.id; await changeEntryDate(); });
+                    const dateValue = r.date || (doc.id.match(/^\d{4}-\d{2}-\d{2}$/) ? doc.id : '');
+                    const dateLabel = dateValue ? dateValue.split('-').reverse().join('/') : 'Data não informada';
+                    const apps = [
+                        ['Uber', r.uber], ['99', r.app99], ['inDrive', r.indrive],
+                        ['Karona', r.karona], ['Outros/Particular', r.otherApps]
+                    ].filter(([,value]) => Number(value) > 0)
+                      .map(([name,value]) => `${name}: ${formatBRL(Number(value))}`);
+                    const gross = (Number(r.uber)||0)+(Number(r.app99)||0)+(Number(r.indrive)||0)+(Number(r.karona)||0)+(Number(r.otherApps)||0);
+                    const expenses = (Number(r.recharge)||0)+(Number(r.food)||0)+(Number(r.other)||0);
+                    const info = document.createElement('div');
+                    info.className = 'flex-1 min-w-0 flex flex-col gap-1';
+                    const title = document.createElement('span');
+                    title.className='font-semibold text-white';
+                    title.textContent = dateLabel;
+                    const source = document.createElement('span');
+                    source.className='text-xs text-emerald-300';
+                    source.textContent = apps.length ? apps.join(' · ') : 'Sem ganhos informados por aplicativo';
+                    const detail = document.createElement('span');
+                    detail.className='text-xs text-slate-400';
+                    detail.textContent = `Total: ${formatBRL(gross)} · Despesas extras: ${formatBRL(expenses)} · KM: ${r.km||0}`;
+                    info.append(title, source, detail);
                     const deleteButton = document.createElement('button');
                     deleteButton.type = 'button';
                     deleteButton.className = 'shrink-0 text-xs text-rose-300 border border-rose-900/60 hover:bg-rose-950 rounded-lg px-3 py-2';
                     deleteButton.textContent = 'Excluir';
                     deleteButton.setAttribute('aria-label', `Excluir lançamento de ${dateLabel}`);
-                    deleteButton.addEventListener('click', () => deleteDailyRecord(doc.id));
+                    deleteButton.addEventListener('click', () => deleteDailyRecord(doc.id, dateLabel));
                     row.append(info, deleteButton);
                     container.appendChild(row);
                 });
@@ -689,27 +689,17 @@
             }
         }
 
-        async function deleteDailyRecord(date) {
+        async function deleteDailyRecord(recordId, dateLabel) {
             if (!currentUser) {
                 alert('Entre na sua conta para excluir um lançamento.');
                 return;
             }
-            const dateLabel = date.split('-').reverse().join('/');
-            const confirmed = confirm(`Tem certeza que deseja excluir o lançamento de ${dateLabel}?\n\nEssa exclusão é permanente e não poderá ser desfeita.`);
+            const confirmed = confirm(`Tem certeza que deseja excluir este lançamento de ${dateLabel}?\n\nEssa exclusão é permanente e não poderá ser desfeita.`);
             if (!confirmed) return;
 
             try {
-                clearTimeout(autosaveTimer);
                 await db.collection('users').doc(currentUser.uid)
-                    .collection('dailyEntries').doc(date).delete();
-
-                if (document.getElementById('entry-date').value === date) {
-                    ['entry-uber','entry-99','entry-indrive','entry-karona','entry-other-apps',
-                     'entry-recharge','entry-km','entry-hours','entry-food','entry-other']
-                        .forEach(id => document.getElementById(id).value = '');
-                    calculateFormTotal();
-                }
-
+                    .collection('dailyEntries').doc(recordId).delete();
                 await loadHistory();
                 setSaveStatus(`Lançamento de ${dateLabel} excluído.`, true);
                 alert(`O lançamento de ${dateLabel} foi excluído.`);
@@ -753,7 +743,8 @@
             clearTimeout(autosaveTimer);
             autosaveTimer = setTimeout(async () => {
                 try {
-                    await saveDailyRecordToHistory();
+                    // Autosave mantém apenas o rascunho semanal; o histórico recebe
+                    // um novo item somente quando o usuário clica em Salvar na Nuvem.
                     await saveDataToCloud();
                 } catch (err) {
                     console.error('Falha no salvamento automático:', err);
