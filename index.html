@@ -235,7 +235,17 @@
                             <span id="badge-carry-mode" class="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-500/30">Redistribuindo</span>
                         </div>
                         <div class="text-2xl font-bold text-emerald-400" id="display-today-target">R$ 250,00</div>
-                        <p class="text-[11px] text-slate-400" id="display-today-subtext">Meta base: R$ 250,00</p>
+                        <div class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80">
+                            <div>
+                                <p class="text-[10px] text-slate-500">Meta normal</p>
+                                <p class="text-xs font-bold text-slate-200" id="display-today-base">R$ 250,00</p>
+                            </div>
+                            <div>
+                                <p class="text-[10px] text-slate-500">Acumulado anterior</p>
+                                <p class="text-xs font-bold text-amber-400" id="display-today-carry">+ R$ 0,00</p>
+                            </div>
+                        </div>
+                        <p class="text-[10px] text-slate-500" id="display-today-subtext">Supermeta: R$ 300,00 (+20%)</p>
                     </div>
 
                     <div class="bg-slate-950/60 p-4 rounded-xl border border-emerald-900/50 space-y-1">
@@ -691,7 +701,14 @@
              'entry-fuel','entry-recharge','entry-km','entry-hours','entry-food','entry-other']
                 .forEach(id => document.getElementById(id).value = '');
             calculateFormTotal();
-            setSaveStatus(`Novo lançamento para ${date}`, true);
+            try {
+                await refreshWeekFromHistory(date);
+                recalculateAll();
+                setSaveStatus(`Histórico da semana carregado para ${date}`, true);
+            } catch (err) {
+                console.error('Erro ao recalcular a semana pelo histórico:', err);
+                setSaveStatus('Não foi possível atualizar as metas pelo histórico.', false);
+            }
         }
 
         async function saveDailyRecordToHistory() {
@@ -711,6 +728,32 @@
                 .collection('dailyEntries').add(record);
             await loadHistory();
             await loadWalletSummary();
+        }
+
+        async function refreshWeekFromHistory(referenceDate, forceEmpty = false) {
+            if (!currentUser || !referenceDate) return;
+            const selected = new Date(`${referenceDate}T12:00:00`);
+            const monday = new Date(selected);
+            monday.setDate(selected.getDate() - ((selected.getDay() + 6) % 7));
+            const sunday = new Date(monday);
+            sunday.setDate(monday.getDate() + 6);
+            const toISO = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            const start = toISO(monday);
+            const end = toISO(sunday);
+            const fields = ['uber','app99','indrive','karona','otherApps','fuel','recharge','km','hours','food','other'];
+            const totals = DEFAULT_STATE.days.map(day => ({ ...day }));
+            const snap = await db.collection('users').doc(currentUser.uid)
+                .collection('dailyEntries').where('date', '>=', start).where('date', '<=', end).get();
+            snap.forEach(doc => {
+                const record = doc.data() || {};
+                const date = record.date || doc.id;
+                if (!date || date < start || date > end) return;
+                const index = weekdayIndexFromDate(date);
+                fields.forEach(field => totals[index][field] = (Number(totals[index][field]) || 0) + (Number(record[field]) || 0));
+            });
+            // Se não houver histórico nessa semana, preserva os dados semanais antigos
+            // já salvos, a menos que a exclusão tenha removido o último registro.
+            if (!snap.empty || forceEmpty) appState.days = totals;
         }
 
         async function loadWalletSummary() {
@@ -801,6 +844,10 @@
                     .collection('dailyEntries').doc(recordId).delete();
                 await loadHistory();
                 await loadWalletSummary();
+                const selectedDate = document.getElementById('entry-date').value || localDateString();
+                await refreshWeekFromHistory(selectedDate, true);
+                await saveDataToCloud();
+                recalculateAll();
                 setSaveStatus(`Lançamento de ${dateLabel} excluído.`, true);
                 alert(`O lançamento de ${dateLabel} foi excluído.`);
             } catch (err) {
@@ -969,6 +1016,7 @@
 
             document.getElementById('entry-date').value ||= localDateString();
             await saveDailyRecordToHistory();
+            await refreshWeekFromHistory(document.getElementById('entry-date').value);
             await saveDataToCloud();
             recalculateAll();
             alert("Lançamento salvo no histórico permanente e na nuvem!");
@@ -1026,22 +1074,24 @@
                 totKarona += day.karona || 0;
                 totOther += day.otherApps || 0;
 
-                const remainingDays = Math.max(1, cfg.workDays - i);
-                const targetForToday = isWorkingDay ? Math.max(0, baseDailyTarget + (accumulatedDeficit / remainingDays)) : 0;
+                // O que faltou (ou sobrou) nos dias anteriores é levado integralmente
+                // para a próxima meta de trabalho, sem dividir o valor pelos dias restantes.
+                const carryIn = isWorkingDay ? accumulatedDeficit : 0;
+                const targetForToday = isWorkingDay ? Math.max(0, baseDailyTarget + carryIn) : 0;
                 const fuelCostDay = Number(day.fuel) || 0;
                 const rechargeCostDay = (Number(day.recharge) || 0) + (Number(day.food) || 0) + (Number(day.other) || 0);
                 const totalCostDay = fuelCostDay + rechargeCostDay;
                 const netProfitDay = dayGross - totalCostDay;
 
                 if (isWorkingDay && (dayGross > 0 || i < getSelectedDayIndex())) {
-                    accumulatedDeficit -= (dayGross - targetForToday);
+                    accumulatedDeficit += (targetForToday - dayGross);
                 }
                 totalGrossWeek += dayGross;
                 totalFuelWeek += fuelCostDay;
                 totalRechargeWeek += rechargeCostDay;
                 totalNetWeek += netProfitDay;
-                computedDays.push({ ...day, gross: dayGross, target: targetForToday, fuelCost: fuelCostDay,
-                    rechargeCost: rechargeCostDay, fixedCost: 0, netProfit: netProfitDay });
+                computedDays.push({ ...day, gross: dayGross, target: targetForToday, carryIn,
+                    fuelCost: fuelCostDay, rechargeCost: rechargeCostDay, fixedCost: 0, netProfit: netProfitDay });
             }
 
             document.getElementById('display-weekly-target').innerText = formatBRL(cfg.weeklyTarget);
@@ -1056,7 +1106,11 @@
             document.getElementById('display-today-target').innerText = formatBRL(currentComputedDay.target);
             const superPercent = Math.max(0, Number(cfg.superTargetPercent ?? 20));
             const superTarget = currentComputedDay.target * (1 + superPercent / 100);
-            document.getElementById('display-today-subtext').innerText = `Meta base: ${formatBRL(baseDailyTarget)} · Supermeta: ${formatBRL(superTarget)} (+${superPercent}%)`;
+            const carryValue = Number(currentComputedDay.carryIn) || 0;
+            document.getElementById('display-today-base').innerText = formatBRL(baseDailyTarget);
+            document.getElementById('display-today-carry').innerText = `${carryValue > 0 ? '+' : carryValue < 0 ? '−' : ''} ${formatBRL(Math.abs(carryValue))}`;
+            document.getElementById('display-today-carry').className = `text-xs font-bold ${carryValue > 0 ? 'text-amber-400' : carryValue < 0 ? 'text-emerald-400' : 'text-slate-300'}`;
+            document.getElementById('display-today-subtext').innerText = `Supermeta: ${formatBRL(superTarget)} (+${superPercent}%)`;
             renderSelectedDayDetails({ ...currentComputedDay, superTarget, superPercent });
 
             document.getElementById('rep-total-gross').innerText = formatBRL(totalGrossWeek);
