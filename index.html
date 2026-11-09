@@ -105,10 +105,15 @@
                             <i data-lucide="cloud-check" class="w-3 h-3 text-emerald-400"></i>
                             Sincronizado na nuvem
                         </p>
+                        <p id="save-status" class="text-[11px] text-emerald-400 mt-1">Dados sincronizados</p>
                     </div>
                 </div>
                 
                 <div class="flex items-center gap-2">
+                    <button onclick="exportBackup()" class="text-xs text-emerald-400 hover:text-emerald-300 px-3 py-1.5 rounded-lg border border-emerald-900/40 hover:bg-emerald-950/40 transition">
+                        <i data-lucide="download" class="w-3.5 h-3.5 inline"></i>
+                        <span class="hidden sm:inline">Backup</span>
+                    </button>
                     <button onclick="resetToDefaults()" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg border border-slate-800 hover:bg-slate-800 transition flex items-center gap-1.5">
                         <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
                         <span class="hidden sm:inline">Restaurar</span>
@@ -432,6 +437,9 @@
         let appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
         let chartInstance = null;
         let isSignUp = false;
+        let autosaveTimer = null;
+        let saveInProgress = Promise.resolve();
+        let isLoadingCloudData = false;
 
         auth.onAuthStateChanged(user => {
             if (user) {
@@ -516,22 +524,99 @@
 
         async function loadUserDataFromCloud() {
             if (!currentUser) return;
-            const docRef = db.collection('users').doc(currentUser.uid);
-            const doc = await docRef.get();
+            isLoadingCloudData = true;
+            setSaveStatus('Carregando seus dados...', false);
+            try {
+                const docRef = db.collection('users').doc(currentUser.uid);
+                const doc = await docRef.get();
 
-            if (doc.exists) {
-                appState = doc.data();
-            } else {
-                appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
-                await docRef.set(appState);
+                if (doc.exists) {
+                    const cloudData = doc.data() || {};
+                    // Mantém os campos padrão caso uma versão futura acrescente novas opções.
+                    appState = {
+                        ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
+                        ...cloudData,
+                        settings: {
+                            ...DEFAULT_STATE.settings,
+                            ...(cloudData.settings || {})
+                        },
+                        days: Array.isArray(cloudData.days) && cloudData.days.length === 7
+                            ? cloudData.days
+                            : JSON.parse(JSON.stringify(DEFAULT_STATE.days))
+                    };
+                } else {
+                    appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
+                    await docRef.set(appState);
+                }
+                syncFormWithState();
+                recalculateAll();
+                setSaveStatus('Dados carregados da nuvem', true);
+            } catch (err) {
+                console.error('Erro ao carregar dados:', err);
+                setSaveStatus('ERRO ao carregar. Não altere nem zere os dados; verifique a internet.', false);
+                alert('Não foi possível carregar seus dados da nuvem. Não faça novos lançamentos nem clique em Restaurar até resolvermos. Erro: ' + (err.message || err));
+            } finally {
+                isLoadingCloudData = false;
             }
-            syncFormWithState();
-            recalculateAll();
+        }
+
+        function setSaveStatus(message, success) {
+            const el = document.getElementById('save-status');
+            if (!el) return;
+            el.textContent = message;
+            el.className = 'text-[11px] mt-1 ' + (success ? 'text-emerald-400' : 'text-amber-300');
         }
 
         async function saveDataToCloud() {
-            if (!currentUser) return;
-            await db.collection('users').doc(currentUser.uid).set(appState);
+            if (!currentUser || isLoadingCloudData) return;
+            const userId = currentUser.uid;
+            const snapshot = JSON.parse(JSON.stringify(appState));
+            setSaveStatus('Salvando na nuvem...', true);
+
+            saveInProgress = saveInProgress.catch(() => {}).then(async () => {
+                if (!currentUser || currentUser.uid !== userId) return;
+                await db.collection('users').doc(userId).set(snapshot);
+                if (currentUser && currentUser.uid === userId) {
+                    setSaveStatus('Salvo na nuvem ✓', true);
+                }
+            }).catch(err => {
+                console.error('Erro ao salvar dados:', err);
+                setSaveStatus('ERRO ao salvar! Confira a internet antes de sair.', false);
+                throw err;
+            });
+            return saveInProgress;
+        }
+
+        function scheduleAutosave() {
+            if (!currentUser || isLoadingCloudData) return;
+            setSaveStatus('Alterações pendentes...', true);
+            clearTimeout(autosaveTimer);
+            autosaveTimer = setTimeout(() => {
+                saveDataToCloud().catch(() => {});
+            }, 900);
+        }
+
+        function exportBackup() {
+            if (!currentUser) {
+                alert('Entre na sua conta para exportar seus dados.');
+                return;
+            }
+            const backup = {
+                app: 'Money Car',
+                exportedAt: new Date().toISOString(),
+                userEmail: currentUser.email || '',
+                data: appState
+            };
+            const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'backup-money-car-' + new Date().toISOString().slice(0, 10) + '.json';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            alert('Backup baixado. Guarde esse arquivo em um local seguro.');
         }
 
         function switchTab(tabId) {
@@ -595,7 +680,7 @@
             appState.settings.fuelPrice = parseFloat(document.getElementById('cfg-fuel-price').value) || 0;
             appState.settings.fuelConsumption = parseFloat(document.getElementById('cfg-fuel-consumption').value) || 1;
 
-            saveDataToCloud();
+            saveDataToCloud().catch(() => {});
             recalculateAll();
         }
 
@@ -619,6 +704,37 @@
             recalculateAll();
             alert("Dados salvos com sucesso na nuvem!");
         }
+
+        function captureDailyFormIntoState() {
+            if (!currentUser || isLoadingCloudData) return;
+            const dayIdx = parseInt(document.getElementById('input-selected-day').value);
+            const day = appState.days[dayIdx];
+            if (!day) return;
+            day.uber = parseFloat(document.getElementById('entry-uber').value) || 0;
+            day.app99 = parseFloat(document.getElementById('entry-99').value) || 0;
+            day.indrive = parseFloat(document.getElementById('entry-indrive').value) || 0;
+            day.karona = parseFloat(document.getElementById('entry-karona').value) || 0;
+            day.otherApps = parseFloat(document.getElementById('entry-other-apps').value) || 0;
+            day.recharge = parseFloat(document.getElementById('entry-recharge').value) || 0;
+            day.km = parseFloat(document.getElementById('entry-km').value) || 0;
+            day.hours = parseFloat(document.getElementById('entry-hours').value) || 0;
+            day.food = parseFloat(document.getElementById('entry-food').value) || 0;
+            day.other = parseFloat(document.getElementById('entry-other').value) || 0;
+            scheduleAutosave();
+        }
+
+        // Salva automaticamente os campos do dia após pequenas pausas na digitação.
+        document.addEventListener('DOMContentLoaded', () => {
+            const dailyFields = [
+                'entry-uber', 'entry-99', 'entry-indrive', 'entry-karona',
+                'entry-other-apps', 'entry-recharge', 'entry-km', 'entry-hours',
+                'entry-food', 'entry-other'
+            ];
+            dailyFields.forEach(id => {
+                const field = document.getElementById(id);
+                if (field) field.addEventListener('input', captureDailyFormIntoState);
+            });
+        });
 
         function recalculateAll() {
             const cfg = appState.settings;
@@ -766,11 +882,21 @@
         }
 
         async function resetToDefaults() {
-            if (confirm("Deseja zerar os seus dados para recomeçar do zero?")) {
+            const first = confirm("ATENÇÃO: Restaurar apagará os lançamentos e configurações salvos nesta conta. Recomendamos baixar um Backup antes. Deseja continuar?");
+            if (!first) return;
+            const confirmation = prompt('Para confirmar a exclusão dos dados desta conta, digite APAGAR:');
+            if (confirmation !== 'APAGAR') {
+                alert('Operação cancelada. Seus dados foram mantidos.');
+                return;
+            }
+            try {
                 appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
                 await saveDataToCloud();
                 syncFormWithState();
                 recalculateAll();
+                alert('Os dados desta conta foram restaurados. Se não era isso que queria, use seu backup para recuperar.');
+            } catch (err) {
+                alert('Não foi possível concluir a restauração. Erro: ' + (err.message || err));
             }
         }
     </script>
