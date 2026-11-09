@@ -191,7 +191,11 @@
                                 <i data-lucide="plus-circle" class="w-5 h-5 text-emerald-400"></i>
                                 Registo de Produção
                             </h2>
-                            <select id="input-selected-day" onchange="loadDayDataIntoForm()" class="bg-slate-950 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+                            <div class="flex flex-col sm:flex-row gap-2 items-start sm:items-center">
+                                <label class="text-xs text-slate-300">Data do lançamento:
+                                    <input type="date" id="entry-date" onchange="changeEntryDate()" class="ml-1 bg-slate-950 border border-slate-700 text-xs text-white rounded-lg px-2 py-1.5">
+                                </label>
+                                <select id="input-selected-day" disabled class="bg-slate-950 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
                                 <option value="0">Segunda-feira</option>
                                 <option value="1">Terça-feira</option>
                                 <option value="2">Quarta-feira</option>
@@ -199,7 +203,8 @@
                                 <option value="4">Sexta-feira</option>
                                 <option value="5">Sábado</option>
                                 <option value="6">Domingo</option>
-                            </select>
+                                </select>
+                            </div>
                         </div>
 
                         <form id="form-daily-entry" onsubmit="saveDailyEntry(event)" class="space-y-4">
@@ -330,6 +335,16 @@
                         </div>
                     </div>
                 </div>
+                <section class="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-lg space-y-3 mt-6">
+                    <div class="flex items-center justify-between gap-3">
+                        <div>
+                            <h3 class="font-bold text-white">Histórico permanente de lançamentos</h3>
+                            <p class="text-xs text-slate-400">Registros organizados por data, mês e ano.</p>
+                        </div>
+                        <button type="button" onclick="loadHistory()" class="text-xs text-emerald-400 border border-emerald-900/40 rounded-lg px-3 py-2">Atualizar</button>
+                    </div>
+                    <div id="history-list" class="space-y-2 text-sm text-slate-300"><p class="text-xs text-slate-500">Entre na sua conta para carregar o histórico.</p></div>
+                </section>
             </div>
 
             <div id="tab-content-simulator" class="tab-content hidden space-y-6">
@@ -449,6 +464,8 @@
                 document.getElementById('user-email-display').innerHTML = `<i data-lucide="cloud-check" class="w-3 h-3 text-emerald-400"></i> ${user.email}`;
                 lucide.createIcons();
                 initChart();
+                document.getElementById('entry-date').value = localDateString();
+                document.getElementById('input-selected-day').value = String(weekdayIndexFromDate(localDateString()));
                 loadUserDataFromCloud();
             } else {
                 currentUser = null;
@@ -549,14 +566,117 @@
                     await docRef.set(appState);
                 }
                 syncFormWithState();
+                await changeEntryDate();
                 recalculateAll();
                 setSaveStatus('Dados carregados da nuvem', true);
+                await loadHistory();
             } catch (err) {
                 console.error('Erro ao carregar dados:', err);
                 setSaveStatus('ERRO ao carregar. Não altere nem zere os dados; verifique a internet.', false);
                 alert('Não foi possível carregar seus dados da nuvem. Não faça novos lançamentos nem clique em Restaurar até resolvermos. Erro: ' + (err.message || err));
             } finally {
                 isLoadingCloudData = false;
+            }
+        }
+
+        function localDateString(date = new Date()) {
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        }
+
+        function weekdayIndexFromDate(dateString) {
+            const d = new Date(`${dateString}T12:00:00`);
+            return (d.getDay() + 6) % 7;
+        }
+
+        function readDailyForm() {
+            return {
+                uber: parseFloat(document.getElementById('entry-uber').value) || 0,
+                app99: parseFloat(document.getElementById('entry-99').value) || 0,
+                indrive: parseFloat(document.getElementById('entry-indrive').value) || 0,
+                karona: parseFloat(document.getElementById('entry-karona').value) || 0,
+                otherApps: parseFloat(document.getElementById('entry-other-apps').value) || 0,
+                recharge: parseFloat(document.getElementById('entry-recharge').value) || 0,
+                km: parseFloat(document.getElementById('entry-km').value) || 0,
+                hours: parseFloat(document.getElementById('entry-hours').value) || 0,
+                food: parseFloat(document.getElementById('entry-food').value) || 0,
+                other: parseFloat(document.getElementById('entry-other').value) || 0
+            };
+        }
+
+        async function changeEntryDate() {
+            const date = document.getElementById('entry-date').value;
+            if (!date || !currentUser) return;
+            const dayIdx = weekdayIndexFromDate(date);
+            document.getElementById('input-selected-day').value = String(dayIdx);
+            try {
+                const snap = await db.collection('users').doc(currentUser.uid)
+                    .collection('dailyEntries').doc(date).get();
+                if (snap.exists) {
+                    const record = snap.data();
+                    Object.entries({
+                        'entry-uber':'uber','entry-99':'app99','entry-indrive':'indrive','entry-karona':'karona',
+                        'entry-other-apps':'otherApps','entry-recharge':'recharge','entry-km':'km','entry-hours':'hours',
+                        'entry-food':'food','entry-other':'other'
+                    }).forEach(([id,key]) => document.getElementById(id).value = record[key] ?? '');
+                    setSaveStatus(`Registro de ${date} carregado`, true);
+                } else {
+                    ['entry-uber','entry-99','entry-indrive','entry-karona','entry-other-apps','entry-recharge','entry-km','entry-hours','entry-food','entry-other'].forEach(id => document.getElementById(id).value = '');
+                    setSaveStatus(`Novo lançamento para ${date}`, true);
+                }
+                calculateFormTotal();
+            } catch (err) {
+                console.error('Erro ao consultar histórico:', err);
+                setSaveStatus('Não foi possível consultar essa data.', false);
+            }
+        }
+
+        async function saveDailyRecordToHistory() {
+            if (!currentUser) throw new Error('Faça login para salvar.');
+            const date = document.getElementById('entry-date').value || localDateString();
+            const record = {
+                ...readDailyForm(),
+                date,
+                year: Number(date.slice(0,4)),
+                month: Number(date.slice(5,7)),
+                day: Number(date.slice(8,10)),
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            };
+            await db.collection('users').doc(currentUser.uid)
+                .collection('dailyEntries').doc(date).set(record, { merge: true });
+            await loadHistory();
+        }
+
+        async function loadHistory() {
+            const container = document.getElementById('history-list');
+            if (!container || !currentUser) return;
+            try {
+                const snap = await db.collection('users').doc(currentUser.uid)
+                    .collection('dailyEntries').orderBy('date', 'desc').limit(100).get();
+                if (snap.empty) {
+                    container.innerHTML = '<p class="text-xs text-slate-500">Nenhum lançamento histórico salvo ainda.</p>';
+                    return;
+                }
+                container.innerHTML = '';
+                snap.forEach(doc => {
+                    const r = doc.data();
+                    const row = document.createElement('button');
+                    row.type = 'button';
+                    row.className = 'w-full text-left bg-slate-950 border border-slate-800 hover:border-emerald-500/50 rounded-xl p-3 flex flex-wrap justify-between gap-2';
+                    const dateLabel = doc.id.split('-').reverse().join('/');
+                    const gross = (r.uber||0)+(r.app99||0)+(r.indrive||0)+(r.karona||0)+(r.otherApps||0);
+                    const expenses = (r.recharge||0)+(r.food||0)+(r.other||0);
+                    const title = document.createElement('span'); title.className='font-semibold text-white'; title.textContent=dateLabel;
+                    const detail = document.createElement('span'); detail.className='text-xs text-slate-400'; detail.textContent=`Ganhos: ${formatBRL(gross)} · Despesas extras: ${formatBRL(expenses)} · KM: ${r.km||0}`;
+                    row.append(title, detail);
+                    row.addEventListener('click', async () => { document.getElementById('entry-date').value=doc.id; await changeEntryDate(); });
+                    container.appendChild(row);
+                });
+            } catch (err) {
+                console.error('Erro ao carregar histórico:', err);
+                container.innerHTML = '<p class="text-xs text-amber-300">Não foi possível carregar o histórico. Verifique as regras do Firestore.</p>';
             }
         }
 
@@ -591,21 +711,37 @@
             if (!currentUser || isLoadingCloudData) return;
             setSaveStatus('Alterações pendentes...', true);
             clearTimeout(autosaveTimer);
-            autosaveTimer = setTimeout(() => {
-                saveDataToCloud().catch(() => {});
-            }, 900);
+            autosaveTimer = setTimeout(async () => {
+                try {
+                    await saveDailyRecordToHistory();
+                    await saveDataToCloud();
+                } catch (err) {
+                    console.error('Falha no salvamento automático:', err);
+                    setSaveStatus('ERRO ao salvar. Mantenha a página aberta e verifique a conexão.', false);
+                }
+            }, 1200);
         }
 
-        function exportBackup() {
+        async function exportBackup() {
             if (!currentUser) {
                 alert('Entre na sua conta para exportar seus dados.');
+                return;
+            }
+            let history = [];
+            try {
+                const historySnap = await db.collection('users').doc(currentUser.uid)
+                    .collection('dailyEntries').orderBy('date', 'asc').get();
+                history = historySnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            } catch (err) {
+                alert('Não foi possível incluir o histórico no backup. Nenhum arquivo foi gerado. Erro: ' + (err.message || err));
                 return;
             }
             const backup = {
                 app: 'Money Car',
                 exportedAt: new Date().toISOString(),
                 userEmail: currentUser.email || '',
-                data: appState
+                currentSettingsAndWeek: appState,
+                permanentDailyHistory: history
             };
             const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
@@ -700,9 +836,11 @@
             appState.days[dayIdx].food = parseFloat(document.getElementById('entry-food').value) || 0;
             appState.days[dayIdx].other = parseFloat(document.getElementById('entry-other').value) || 0;
 
+            document.getElementById('entry-date').value ||= localDateString();
+            await saveDailyRecordToHistory();
             await saveDataToCloud();
             recalculateAll();
-            alert("Dados salvos com sucesso na nuvem!");
+            alert("Lançamento salvo no histórico permanente e na nuvem!");
         }
 
         function captureDailyFormIntoState() {
@@ -725,6 +863,8 @@
 
         // Salva automaticamente os campos do dia após pequenas pausas na digitação.
         document.addEventListener('DOMContentLoaded', () => {
+            const dateField = document.getElementById('entry-date');
+            if (dateField && !dateField.value) dateField.value = localDateString();
             const dailyFields = [
                 'entry-uber', 'entry-99', 'entry-indrive', 'entry-karona',
                 'entry-other-apps', 'entry-recharge', 'entry-km', 'entry-hours',
