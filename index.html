@@ -662,21 +662,61 @@
                 container.innerHTML = '';
                 snap.forEach(doc => {
                     const r = doc.data();
-                    const row = document.createElement('button');
-                    row.type = 'button';
-                    row.className = 'w-full text-left bg-slate-950 border border-slate-800 hover:border-emerald-500/50 rounded-xl p-3 flex flex-wrap justify-between gap-2';
+                    const row = document.createElement('div');
+                    row.className = 'w-full text-left bg-slate-950 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2';
                     const dateLabel = doc.id.split('-').reverse().join('/');
                     const gross = (r.uber||0)+(r.app99||0)+(r.indrive||0)+(r.karona||0)+(r.otherApps||0);
                     const expenses = (r.recharge||0)+(r.food||0)+(r.other||0);
+                    const info = document.createElement('button');
+                    info.type = 'button';
+                    info.className = 'flex-1 min-w-0 text-left flex flex-col gap-1 hover:opacity-80';
                     const title = document.createElement('span'); title.className='font-semibold text-white'; title.textContent=dateLabel;
                     const detail = document.createElement('span'); detail.className='text-xs text-slate-400'; detail.textContent=`Ganhos: ${formatBRL(gross)} · Despesas extras: ${formatBRL(expenses)} · KM: ${r.km||0}`;
-                    row.append(title, detail);
-                    row.addEventListener('click', async () => { document.getElementById('entry-date').value=doc.id; await changeEntryDate(); });
+                    info.append(title, detail);
+                    info.addEventListener('click', async () => { document.getElementById('entry-date').value=doc.id; await changeEntryDate(); });
+                    const deleteButton = document.createElement('button');
+                    deleteButton.type = 'button';
+                    deleteButton.className = 'shrink-0 text-xs text-rose-300 border border-rose-900/60 hover:bg-rose-950 rounded-lg px-3 py-2';
+                    deleteButton.textContent = 'Excluir';
+                    deleteButton.setAttribute('aria-label', `Excluir lançamento de ${dateLabel}`);
+                    deleteButton.addEventListener('click', () => deleteDailyRecord(doc.id));
+                    row.append(info, deleteButton);
                     container.appendChild(row);
                 });
             } catch (err) {
                 console.error('Erro ao carregar histórico:', err);
                 container.innerHTML = '<p class="text-xs text-amber-300">Não foi possível carregar o histórico. Verifique as regras do Firestore.</p>';
+            }
+        }
+
+        async function deleteDailyRecord(date) {
+            if (!currentUser) {
+                alert('Entre na sua conta para excluir um lançamento.');
+                return;
+            }
+            const dateLabel = date.split('-').reverse().join('/');
+            const confirmed = confirm(`Tem certeza que deseja excluir o lançamento de ${dateLabel}?\n\nEssa exclusão é permanente e não poderá ser desfeita.`);
+            if (!confirmed) return;
+
+            try {
+                clearTimeout(autosaveTimer);
+                await db.collection('users').doc(currentUser.uid)
+                    .collection('dailyEntries').doc(date).delete();
+
+                if (document.getElementById('entry-date').value === date) {
+                    ['entry-uber','entry-99','entry-indrive','entry-karona','entry-other-apps',
+                     'entry-recharge','entry-km','entry-hours','entry-food','entry-other']
+                        .forEach(id => document.getElementById(id).value = '');
+                    calculateFormTotal();
+                }
+
+                await loadHistory();
+                setSaveStatus(`Lançamento de ${dateLabel} excluído.`, true);
+                alert(`O lançamento de ${dateLabel} foi excluído.`);
+            } catch (err) {
+                console.error('Erro ao excluir lançamento:', err);
+                setSaveStatus('Não foi possível excluir o lançamento.', false);
+                alert('Não foi possível excluir. Verifique sua conexão e as regras do Firestore.');
             }
         }
 
