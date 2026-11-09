@@ -1001,6 +1001,30 @@
             document.getElementById('card-day-net-hour').innerText = `${formatBRL(netPerHour)}/h`;
             document.getElementById('card-day-net-km').innerText = `${formatBRL(netPerKm)}/km`;
 
+            // Atualiza a análise da meta em tempo real usando a meta diária
+            // calculada a partir da meta semanal e dos dias de trabalho.
+            const targetDiffEl = document.getElementById('card-day-target-diff');
+            const targetExplanationEl = document.getElementById('card-day-target-explanation');
+            const dailyTarget = Math.max(0, Number(day.target) || 0);
+            const grossToday = Math.max(0, Number(day.gross) || 0);
+            const difference = grossToday - dailyTarget;
+
+            if (targetDiffEl && targetExplanationEl) {
+                if (dailyTarget <= 0) {
+                    targetDiffEl.innerText = 'Diferença: —';
+                    targetExplanationEl.innerText = 'Configure uma meta semanal e os dias de trabalho para calcular sua meta diária.';
+                    targetDiffEl.className = 'font-bold text-slate-400';
+                } else if (difference >= 0) {
+                    targetDiffEl.innerText = `Acima da meta: ${formatBRL(difference)}`;
+                    targetExplanationEl.innerText = `Meta diária atingida! Sua meta para hoje é ${formatBRL(dailyTarget)}.`;
+                    targetDiffEl.className = 'font-bold text-emerald-400';
+                } else {
+                    targetDiffEl.innerText = `Faltam: ${formatBRL(Math.abs(difference))}`;
+                    targetExplanationEl.innerText = `Você já registrou ${formatBRL(grossToday)}. Faltam ${formatBRL(Math.abs(difference))} para atingir a meta diária de ${formatBRL(dailyTarget)}.`;
+                    targetDiffEl.className = 'font-bold text-amber-400';
+                }
+            }
+
             const badgeStatus = document.getElementById('badge-day-status');
             if (day.gross === 0) {
                 badgeStatus.className = "text-xs px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 border border-slate-700";
